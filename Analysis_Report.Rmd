@@ -1,0 +1,143 @@
+# Human Activity Recognition - Quantifying the "How Well"
+by *Zhen Yao* on *9th January 2017*
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Executive Summary
+Using devices such as *Jawbone Up*, *Nike FuelBand*, and *Fitbit* it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify *how much* of a particular activity they do, but they rarely quantify *how well* they do it.
+
+## Analytical Tools
+The version of R packages used for analysis are listed as follows:
+```{r loadLibraries, message = FALSE}
+library(caret) # Version: 6.0.73
+library(sparsediscrim) # Version: 0.0.3
+library(randomForest) # Version 4.6.12
+library(gbm) # Version: 2.1.1
+```
+
+## Data Preparation
+This report uses Ugulino *et al.* (2012) data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants to predict the manner in which they did the exercise. Some data cleaning and processing steps were conducted before analysis:   
+1. Measurements that contain at least one text value, are converted to numeric, with non-numeric values treated as missing.  
+2. The first 7 columns are removed from both datasets as they are subject or time related variables, which do not make sense for including these variables in prediction.  
+3. Measurements with zero or near zero variance are removed from the predictive analysis, the frequency cutoff is 95/5.
+4. Measurements with more than 95% missing values are removed from the predictive analysis. The number of predictors reduces from 153 to 53.  
+5. The training set is further divided into "internal"" training and validation sets. The internal training set is the data used for model building while the validation set serves as the test set for built predictive models. Due to memory constraints, the chosen sampling method is a 4-fold cross-validation with only one repetation.
+```{r dataPreparation, cache = TRUE}
+# Source for Training Set
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",
+              destfile = "pml-training.csv", method = "curl")
+# Source for Test Set
+download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",
+              destfile = "pml-testing.csv", method = "curl")
+# Read the data into R workspace.
+training <- read.csv("pml-training.csv")
+testing <- read.csv("pml-testing.csv")
+
+# Data Cleaning
+# Convert measurements that are classified as Factor to Numeric, non-numeric values are treated as missing.
+factors <- c(12:17, 20, 23, 26, 69:74, 87:92, 95, 98, 101, 125:130, 133, 136, 139)
+for (j in factors) {
+        training[, j] <- gsub("#DIV/0!", "", training[, j])
+        testing[, j] <- gsub("#DIV/0!", "", testing[, j])
+        training[, j] <- as.numeric(training[, j])
+        testing[, j] <- as.numeric(testing[, j])
+}
+# Remove Columns 1-7 as they are subject or time related variables, which do not make sense for including these variables in prediction.
+training <- training[, -c(1:7)]
+testing <- testing[, -c(1:7)]
+# Remove zero or near zero variance predictors, the frequency cutoff is 95/5. The decision is based on training set.
+nzvp <- nearZeroVar(training, freqCut = 95/5)
+training <- training[, -nzvp]
+testing <- testing[, -nzvp]
+# Remove predictors with more than 95% missing values.
+miss <- apply(training, 2, function(x) mean(is.na(x)) > 0.95)
+training <- training[, miss == FALSE]
+testing <- testing[, miss == FALSE]
+# Number of predictors reduced from 153 to 53.
+dim(training); dim(testing)
+# Split the training set into smaller training (for model building) and validation sets.
+set.seed(12345) # To ensure reproducibility.
+inBuild <- createDataPartition(y = training$classe, p = 0.75, list = FALSE)
+building <- training[inBuild, ]
+valid <- training[-inBuild, ]
+dim(building); dim(valid)
+```
+
+## Data Exploration
+Some simple data exploration techniques are performed on the internal training set. The model building sample consists of 14718 observations on activities of 6 participants. The variable of interest (classe) indicate different methods of performing barbell lifts, with one performed correctly and the remaining 5 performed incorrectly. Figure 1 shows the distribution of exercise manners. Method "A" has the highest count, however, the the overall distribution seems to be balanced.
+```{r dataExploration, echo = FALSE}
+with(building, plot(classe, col = "orange",
+                    main = "Figure 1: Distribution of Exercise Manners",
+                    xlab = "Method", ylab = "Frequency"))
+```
+
+## Predictive Models
+3 models are considered in this predictive analysis: Regularized Linear Discriminant Analysis (RLDA), Random Forest (RF) and Generalized Boosted Regression (GBM) models. The models are fitted using default settings (except for RF, where the number of trees is set to 100, instead of 500), and Figures 2-4 displays the plot of variable importance and the corresponding overall accuracy (expressed as percentage of total correct classifications).
+```{r predictiveModelling, cache = TRUE}
+# Fit RLDA, RF, and GBM models, with mostly default settings.
+fitRLDA <- train(classe ~ ., data = building, method = "rlda")
+fitRF <- train(classe ~ ., data = building, method = "rf", ntree = 100)
+fitGBM <- train(classe ~ ., data = building, method = "gbm", distribution = "multinomial", verbose = FALSE)
+# Make predictions on validation set.
+predRLDA <- predict(fitRLDA, newdata = valid)
+predRF <- predict(fitRF, newdata = valid)
+predGBM <- predict(fitGBM, newdata = valid)
+# Evaluate model performances.
+confMatRLDA <- confusionMatrix(predRLDA, valid$classe)
+confMatRF <- confusionMatrix(predRF, valid$classe)
+confMatGBM <- confusionMatrix(predGBM, valid$classe)
+# Variable Importance
+par(mar = c(6, 7, 3, 2))
+varImpRLDA <- data.frame(var = rownames(varImp(fitRLDA)$importance),
+                         varImp(fitRLDA)$importance, row.names = 1:52)
+varImpRLDA$imp <- rowMeans(varImpRLDA[, -1])
+varImpRLDA <- varImpRLDA[order(varImpRLDA$imp, decreasing = TRUE), ]
+with(varImpRLDA[5:1, ], barplot(imp, col = c("red", "orange", "yellow", "green", "blue"),
+                               main = "Figure 2: Regularized Linear Discriminant Analysis Model",
+                               sub = paste("Accuracy =",
+                                           round(100 * confMatRLDA$overall["Accuracy"], 2), "%"),
+                               width = 10, space = 0.2, cex.names = 0.7, las = 2,
+                               names.arg = var, horiz = TRUE,
+                               xlab = "Importance", xlim = c(0, 100)))
+
+varImpRF <- data.frame(var = rownames(varImp(fitRF)$importance),
+                       imp = varImp(fitRF)$importance$Overall)
+varImpRF <- varImpRF[order(varImpRF$imp, decreasing = TRUE), ]
+with(varImpRF[5:1, ], barplot(imp, col = c("red", "orange", "yellow", "green", "blue"),
+                              main = "Figure 3: Random Forest Model",
+                              sub = paste("Accuracy =",
+                                          round(100 * confMatRF$overall["Accuracy"], 2), "%"),
+                              width = 10, space = 0.2, cex.names = 0.7, las = 2,
+                              names.arg = var, horiz = TRUE,
+                              xlab = "Importance", xlim = c(0, 100)))
+
+varImpGBM <- data.frame(var = rownames(varImp(fitGBM)$importance),
+                        imp = varImp(fitGBM)$importance$Overall)
+varImpGBM <- varImpGBM[order(varImpGBM$imp, decreasing = TRUE), ]
+with(varImpGBM[5:1, ], barplot(imp, col = c("red", "orange", "yellow", "green", "blue"),
+                               main = "Figure 4: Generalized Boosted Regression Model",
+                               sub = paste("Accuracy =",
+                                           round(100 * confMatGBM$overall["Accuracy"], 2), "%"),
+                               width = 10, space = 0.2, cex.names = 0.7, las = 2,
+                               names.arg = var, horiz = TRUE,
+                               xlab = "Importance", xlim = c(0, 100)))
+
+confMatRF
+```
+  
+## Conclusion
+The RF and GBM models have slightly different opinions on the importance of variables, while the RLDA model has quite different opinions compared to the former two models. However, the RF model has the highest overall accuracy (99.29%) while the RLDA model has the lowest accuracy (69.35%). The GBM model gives an accuracy of 96.08%, which is close to that of the RF model. So the variable importance can be evaluated based on what is given by the RF and GBM models. The two models suggest that roll_belt, yaw_belt, pitch_forearm, pitch_belt, magnet_dumbbell_y, magnet_dumbbell_z to be important variables that help to identify how well a person performs barbell lifts. Based on the RF model, the 95% confidence interval for out-of-sample rate is (0.91%, 0.50%).
+
+## Prediction on Test Set
+The RF model gives the best accuracy and hence it is used for predicting the exercise manner of 20 observations in the test set. The predictions are given as follow:
+```{r testPredictions}
+testRF <- predict(fitRF, newdata = testing)
+for (i in 1:nrow(testing)) {
+        print(paste("Prediction of ID No.", i, ":", testRF[i]))
+}
+```
+
+## Reference
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. [**Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements.**](http://groupware.les.inf.puc-rio.br/har#dataset#ixzz4VErSiFYm) Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.
